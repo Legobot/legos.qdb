@@ -21,12 +21,12 @@ class Qdb(Lego):
     def _create_schema(self):
         create_quotes_table = '''CREATE TABLE IF NOT EXISTS quotes
                                 (id INTEGER PRIMARY KEY ASC, quote TEXT,
-                                user TEXT, ts DATETIME DEFAULT
+                                user TEXT, channel TEXT, ts DATETIME DEFAULT
                                 CURRENT_TIMESTAMP);'''
         self.db.execute(create_quotes_table)
         create_temp_table = '''CREATE TABLE IF NOT EXISTS temp
                               (id INTEGER PRIMARY KEY ASC, quote TEXT,
-                              user TEXT, ts DATETIME DEFAULT
+                              user TEXT, channel TEXT, ts DATETIME DEFAULT
                               CURRENT_TIMESTAMP);'''
         self.db.execute(create_temp_table)
         self.db.close()
@@ -35,7 +35,7 @@ class Qdb(Lego):
         if message['text'] is not None:
             try:
                 first_word = message['text'].split()[0]
-                if (first_word == '!grab') or (first_word == '!rq') :
+                if (first_word == '!grab') or (first_word == '!rq'):
                     return True
                 else:
                     try:
@@ -61,8 +61,7 @@ class Qdb(Lego):
             last_message_stored = self._store_last_message(message)
             return_val = 'Stored quote: "{}"'.format(last_message_stored)
         elif message['text'].split()[0] == '!rq':
-            random_quote = self._get_random_quote()
-            return_val = '{} said: "{}" at {}.'.format(random_quote['user'], random_quote['quote'], random_quote['ts'])
+            return_val = self._get_random_quote(message)
         self.reply(message, return_val, opts)
 
     def _handle_opts(self, message):
@@ -76,17 +75,14 @@ class Qdb(Lego):
         return opts
 
     def _log_temp_message(self, message):
-        if 'user' in message['metadata']:
-            user = message['metadata']['user']
-        elif 'source_user' in message['metadata']:
-            user = message['metadata']['source_user']
-        else:
-            user = 'NULL'
+        user = message['metadata']['source_user']
+        channel = message['metadata']['source_channel']
         try:
             self.db = sqlite3.connect('q.db')
             cursor = self.db.cursor()
-            insert_temp = 'INSERT INTO temp(quote, user) VALUES(?,?);'
-            cursor.execute(insert_temp, (message['text'], user))
+            insert_temp = '''INSERT INTO temp(quote, user, channel)
+                            VALUES(?,?,?);'''
+            cursor.execute(insert_temp, (message['text'], user, channel))
             self.db.commit()
         except Exception as e:
             logger.error(e)
@@ -94,11 +90,16 @@ class Qdb(Lego):
             self.db.close()
         return True
 
-    def _get_row_count(self, table):
+    def _get_row_count(self, table, **kwargs):
+        if 'channel' in kwargs:
+            condition = ' WHERE channel="{}"'.format(kwargs['channel'])
+        else:
+            condition = ''
         try:
             self.db = sqlite3.connect('q.db')
             cursor = self.db.cursor()
-            select_count = 'SELECT COUNT(*) FROM {};'.format(table)
+            select_count = '''SELECT COUNT(*)
+                             FROM {}{};'''.format(table, condition)
             cursor.execute(select_count)
             count = cursor.fetchone()
         except Exception as e:
@@ -129,11 +130,16 @@ class Qdb(Lego):
         return True
 
     def _get_last_message(self, message):
+        channel = message['metadata']['source_channel']
         try:
             self.db = sqlite3.connect('q.db')
             self.db.row_factory = sqlite3.Row
             cursor = self.db.cursor()
-            select_last_message = 'SELECT * FROM temp WHERE ts < CURRENT_TIMESTAMP ORDER BY ts DESC LIMIT 1;'
+            select_last_message = '''SELECT * FROM temp
+                                    WHERE ts < CURRENT_TIMESTAMP
+                                    AND channel="{}"
+                                    ORDER BY ts DESC
+                                    LIMIT 1;'''.format(channel)
             cursor.execute(select_last_message)
             last_message = cursor.fetchone()
         except Exception as e:
@@ -147,8 +153,11 @@ class Qdb(Lego):
         try:
             self.db = sqlite3.connect('q.db')
             cursor = self.db.cursor()
-            insert_temp = 'INSERT INTO quotes(quote, user) VALUES(?,?);'
-            cursor.execute(insert_temp, (last_message['quote'], last_message['user']))
+            insert_temp = '''INSERT INTO quotes(quote, user, channel)
+                            VALUES(?,?,?);'''
+            cursor.execute(insert_temp, (last_message['quote'],
+                                         last_message['user'],
+                                         last_message['channel']))
             self.db.commit()
         except Exception as e:
             logger.error(e)
@@ -156,24 +165,33 @@ class Qdb(Lego):
             self.db.close()
         return last_message['quote']
 
-    def _get_random_quote(self):
+    def _get_random_quote(self, message):
         count = self._get_row_count('quotes')
-        random_row_num = random.randint(1, count)  # nosec
-        try:
-            self.db = sqlite3.connect('q.db')
-            self.db.row_factory = sqlite3.Row
-            cursor = self.db.cursor()
-            select_random_quote = 'SELECT * FROM quotes LIMIT 1 OFFSET {};'.format(random_row_num)
-            cursor.execute(select_random_quote)
-            random_quote = cursor.fetchone()
-        except Exception as e:
-            logger.error('Error retrieving random quote: {}'.format(e))
-        finally:
-            self.db.close()
-        return random_quote
+        if count == 0:
+            return_val = 'There are no saved quotes for this channel.'
+        else:
+            random_row_num = random.randint(1, count) - 1  # nosec
+            try:
+                self.db = sqlite3.connect('q.db')
+                self.db.row_factory = sqlite3.Row
+                cursor = self.db.cursor()
+                select_random_quote = '''SELECT * FROM quotes
+                                        LIMIT 1
+                                        OFFSET {};'''.format(random_row_num)
+                cursor.execute(select_random_quote)
+                random_quote = cursor.fetchone()
+                return_val = '''<@{}> said: "{}" at {}.'''.format(
+                              random_quote['user'], random_quote['quote'],
+                              random_quote['ts'])
+            except Exception as e:
+                logger.error('Error retrieving random quote: {}'.format(e))
+            finally:
+                self.db.close()
+        return return_val
 
     def get_name(self):
         return 'qdb'
 
     def get_help(self):
-        return '''Save the last message in the quotes db. Usage: !grab'''
+        return '''User quote grabber/retriever. Usage: !grab - saves last line
+                in channel. !rq - Get a random quote.'''
